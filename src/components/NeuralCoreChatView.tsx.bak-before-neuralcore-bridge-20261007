@@ -180,21 +180,6 @@ I have complete, native awareness of our entire platform:
 
   const handleSendMessageWithTextRef = useRef<(text: string) => void>(() => {});
 
-  const callRealNeuralCore = async (query: string): Promise<string> => {
-    const response = await fetch('http://127.0.0.1:8765/run', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tahniz-Gateway': 'tahniz-hazo-local-bridge',
-      },
-      body: JSON.stringify({ message: query }),
-      signal: AbortSignal.timeout(120000),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data?.ok === false) throw new Error(data?.error || `Neural Core HTTP ${response.status}`);
-    return String(data?.output ?? '');
-  };
-
   // Scroll to bottom on message update
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -643,8 +628,8 @@ Say **"Take me to investors"**, **"Open bank enclave"**, **"Show 200 cores"**, *
     currentTranscriptRef.current = '';
     setIsProcessing(true);
 
-    callRealNeuralCore(query).then((realOutput) => {
-      const resp = { text: realOutput || 'Neural Core returned an empty result.' };
+    setTimeout(() => {
+      const resp = generateNeuralCoreResponse(query);
       const aiMsg: ChatMessage = {
         id: `ai-${Date.now()}`,
         sender: 'ai',
@@ -678,14 +663,11 @@ Say **"Take me to investors"**, **"Open bank enclave"**, **"Show 200 cores"**, *
 
       // Voice output response and resume conversation mode if active
       speakText(resp.text, () => {
-        if (isConversationModeRef.current) startListeningLoop();
+        if (isConversationModeRef.current) {
+          startListeningLoop();
+        }
       });
-    }).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      setMessages((prev) => [...prev, { id: `ai-${Date.now()}`, sender: 'ai', text: `Neural Core bridge error: ${message}`, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]);
-    }).finally(() => {
-      setIsProcessing(false);
-    });
+    }, 400);
   };
 
   handleSendMessageWithTextRef.current = handleSendMessageWithText;
