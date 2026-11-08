@@ -24,8 +24,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const [email, setEmail] = useState('damoneward38@gmail.com');
-  const [password, setPassword] = useState('313Damone');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -40,12 +40,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleQuickAdminLogin = () => {
-    platformStore.loginAsAdmin();
-    setError(null);
-    onSuccess();
-    onClose();
-  };
+  // Quick-login admin bypass removed - this was a public, unauthenticated admin backdoor.
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
@@ -65,30 +60,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
           >
             <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* 1-Click Master Admin Quick Login Banner */}
-        <div className="p-3.5 rounded-xl border border-cyan-500/40 bg-cyan-950/30 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
-              <UserCheck className="w-4 h-4 text-cyan-400" />
-              Pre-Configured Admin Account
-            </span>
-            <span className="text-[10px] font-mono text-cyan-400 uppercase bg-cyan-900/60 px-1.5 py-0.5 rounded">
-              Ready
-            </span>
-          </div>
-          <p className="text-[11px] text-slate-300">
-            Log in directly as Master Admin <strong className="text-white">damoneward38@gmail.com</strong> with Enterprise permissions.
-          </p>
-          <button
-            type="button"
-            onClick={handleQuickAdminLogin}
-            className="w-full py-2 px-3 text-xs font-bold text-white bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 rounded-lg shadow transition cursor-pointer flex items-center justify-center gap-2"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            Quick-Login as Damone Ward (Admin)
           </button>
         </div>
 
