@@ -27,17 +27,9 @@ import {
   SHARED_FUNCTIONS,
 } from './neuralCoreData';
 
-// Simple SHA-256 simulation for immutable chain hashing
-function generateCryptoHash(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    const char = seed.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  const hex = Math.abs(hash).toString(16).padStart(8, '0');
-  const randomSalt = Math.random().toString(36).substring(2, 10);
-  return `0x${hex}${randomSalt}a7f93b82c1e4056d9a8c7b654321fedcba9876543210abcdef0123456789`.substring(0, 66);
+async function sha256Hex(seed: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
+  return `0x${Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
 // Initial Seed Businesses
@@ -664,7 +656,7 @@ class PlatformStore {
     this.notify();
 
     if (initialStatus === 'running') {
-      this.simulateClosedLoopExecution(newJob.id, biz);
+      void this.executeClosedLoop(newJob.id, biz);
     }
 
     return newJob;
@@ -706,143 +698,275 @@ class PlatformStore {
     ];
 
     this.notify();
-    this.simulateClosedLoopExecution(job.id, biz);
+    void this.executeClosedLoop(job.id, biz);
   }
 
   // CLOSED-LOOP EXECUTION ENGINE
-  // UNDERSTAND -> PLAN -> FIND -> FACT -> DELEGATE -> EXECUTE -> OBSERVE -> VERIFY -> (REPAIR if needed) -> VERIFY AGAIN -> REPORT
-  private simulateClosedLoopExecution(jobId: string, biz: BusinessProfile) {
-    const stages: OperatingStage[] = [
-      'UNDERSTAND',
-      'PLAN',
-      'FIND',
-      'FACT',
-      'DELEGATE',
-      'EXECUTE',
-      'OBSERVE',
-      'VERIFY',
-      'REPORT',
-    ];
+  // Runs deterministic local validation and artifact checks. It does not claim
+  // that external media, payment, or deployment providers were executed.
+  private async executeClosedLoop(jobId: string, biz: BusinessProfile) {
+    const job = this.jobs.find((j) => j.id === jobId);
+    if (!job || job.status !== 'running') return;
 
-    let stageIdx = 0;
+    const wait = () => new Promise((resolve) => setTimeout(resolve, 140));
+    const mark = (stage: OperatingStage, status: 'pending' | 'running' | 'completed' | 'failed' | 'repaired', details: string) => {
+      const step = job.closedLoopSteps?.find((entry) => entry.stage === stage);
+      if (step) {
+        step.status = status;
+        step.details = details;
+        step.timestamp = new Date().toLocaleTimeString();
+      }
+      job.currentStage = stage;
+      this.notify();
+    };
+    const log = (level: JobLog['level'], stage: OperatingStage, message: string) => {
+      job.logs.push({ timestamp: new Date().toLocaleTimeString(), level, stage, message });
+    };
 
-    const stageInterval = setInterval(() => {
-      const job = this.jobs.find((j) => j.id === jobId);
-      if (!job || job.status !== 'running') {
-        clearInterval(stageInterval);
-        return;
+    try {
+      mark('UNDERSTAND', 'running', 'Parsing the submitted blueprint and task definitions.');
+      await wait();
+      let blueprint: Record<string, unknown>;
+      try {
+        blueprint = JSON.parse(biz.blueprintJson || '{}');
+      } catch {
+        throw new Error('Blueprint JSON is not valid JSON.');
+      }
+      if (!biz.name?.trim()) throw new Error('Business name is required.');
+      if (!Array.isArray(biz.tasks) || biz.tasks.length === 0) throw new Error('At least one blueprint task is required.');
+      log('info', 'UNDERSTAND', `Parsed blueprint for ${biz.name} with ${biz.tasks.length} task(s).`);
+      mark('UNDERSTAND', 'completed', `Validated blueprint structure and ${biz.tasks.length} task definition(s).`);
+      await wait();
+
+      mark('PLAN', 'running', 'Building the local task dependency plan.');
+      const duplicateTaskIds = biz.tasks
+        .map((task) => task.id)
+        .filter((id, index, ids) => ids.indexOf(id) !== index);
+      const invalidTasks = biz.tasks.filter((task) => !task.id || !task.name || !task.function || !task.group);
+      if (duplicateTaskIds.length > 0) throw new Error(`Duplicate task id(s): ${[...new Set(duplicateTaskIds)].join(', ')}`);
+      if (invalidTasks.length > 0) throw new Error(`${invalidTasks.length} task(s) are missing id, name, function, or group.`);
+      log('info', 'PLAN', `Planned ${biz.tasks.length} task(s) across groups ${[...new Set(biz.tasks.map((task) => task.group))].join(', ')}.`);
+      mark('PLAN', 'completed', `Task DAG validated with no duplicate ids or missing required fields.`);
+      await wait();
+
+      mark('FIND', 'running', 'Running static analysis against the submitted blueprint.');
+      const findings = this.scanBlueprint(biz, blueprint);
+      const criticalFindings = findings.filter((finding) => finding.severity === 'critical');
+      const warningFindings = findings.filter((finding) => finding.severity === 'warning');
+      log(criticalFindings.length ? 'security' : 'info', 'FIND', `Static analysis found ${criticalFindings.length} critical and ${warningFindings.length} warning issue(s).`);
+      findings.forEach((finding) => log(finding.severity === 'critical' ? 'security' : 'warn', 'FIND', `${finding.code}: ${finding.detail}`));
+      mark('FIND', criticalFindings.length ? 'failed' : 'completed', `Static analysis completed: ${criticalFindings.length} critical, ${warningFindings.length} warning.`);
+      await wait();
+
+      mark('FACT', 'running', 'Verifying plan facts against the declared compliance and deployment settings.');
+      const securityTaskCount = biz.tasks.filter((task) => task.type === 'security' || ['A', 'B', 'C', 'D', 'E'].includes(task.group)).length;
+      if (biz.complianceReqs.length > 0 && securityTaskCount === 0) {
+        log('warn', 'FACT', `Compliance requirements (${biz.complianceReqs.join(', ')}) are declared but no security task is assigned.`);
+      }
+      log('info', 'FACT', `Verified ${biz.tasks.length} task fact(s), ${biz.complianceReqs.length} compliance requirement(s), and schedule ${biz.schedule.scanInterval}/${biz.schedule.deployOn}.`);
+      mark('FACT', 'completed', `Task metadata, compliance declarations, and schedule fields were parsed successfully.`);
+      await wait();
+
+      mark('DELEGATE', 'running', 'Assigning specialist cores to the validated task groups.');
+      const assignedCores = biz.tasks
+        .map((task) => this.specialistCores.find((core) => core.group === task.group && core.type === task.type))
+        .filter((core): core is SpecialistCoreIdentity => Boolean(core));
+      assignedCores.forEach((core) => {
+        if (!job.agentsUsed.includes(core.id)) job.agentsUsed.push(core.id);
+        core.totalJobsProcessed++;
+      });
+      if (assignedCores.length === 0) throw new Error('No specialist core matched the submitted task groups.');
+      log('info', 'DELEGATE', `Assigned ${assignedCores.length} specialist core(s) across ${new Set(biz.tasks.map((task) => task.group)).size} group(s).`);
+      mark('DELEGATE', 'completed', `Assigned ${assignedCores.length} specialist core(s) to the local execution plan.`);
+      await wait();
+
+      mark('EXECUTE', 'running', 'Executing local validation and artifact generation for each task.');
+      const results = [];
+      for (const task of biz.tasks) {
+        results.push(await this.executeLocalTask(task, biz, blueprint, findings));
+      }
+      job.tasksCompleted = results.filter((result) => result.ok).length;
+      results.forEach((result) => log(result.ok ? 'success' : 'error', 'EXECUTE', `${result.name}: ${result.detail}`));
+      mark('EXECUTE', results.every((result) => result.ok) ? 'completed' : 'failed', `Completed ${job.tasksCompleted}/${results.length} local task check(s).`);
+      await wait();
+
+      mark('OBSERVE', 'running', 'Collecting execution timings and artifact invariants.');
+      const totalLatency = results.reduce((total, result) => total + result.latencyMs, 0);
+      const artifactCount = results.filter((result) => Boolean(result.artifact)).length;
+      log('info', 'OBSERVE', `Observed ${artifactCount} local artifact hash(es) in ${totalLatency}ms total execution time.`);
+      mark('OBSERVE', 'completed', `Observed ${artifactCount} artifact hash(es); total local execution time ${totalLatency}ms.`);
+      await wait();
+
+      mark('VERIFY', 'running', 'Recomputing artifact hashes and collecting local verification votes.');
+      const verification = await this.verifyExecutionResults(results);
+      job.votes = verification.votes;
+      log(verification.votes.agreed ? 'success' : 'error', 'VERIFY', `Local verification: ${verification.votes.passedVotes}/${verification.votes.totalVotes} votes passed.`);
+      mark('VERIFY', verification.votes.agreed ? 'completed' : 'failed', `${verification.votes.passedVotes}/${verification.votes.totalVotes} local verification votes passed.`);
+      await wait();
+
+      const passed = criticalFindings.length === 0
+        && invalidTasks.length === 0
+        && results.every((result) => result.ok)
+        && verification.allHashesValid
+        && verification.votes.agreed;
+
+      if (job.closedLoopSteps?.some((step) => step.stage === 'REPAIR')) {
+        mark('REPAIR', passed ? 'completed' : 'failed', passed ? 'No repair was required.' : 'Automatic repair was not attempted because the failed checks require operator review.');
+        await wait();
+      }
+      if (job.closedLoopSteps?.some((step) => step.stage === 'VERIFY_AGAIN')) {
+        mark('VERIFY_AGAIN', passed ? 'completed' : 'failed', passed ? 'Post-verification state unchanged; no repair was applied.' : 'Re-verification was not possible without a repair.');
+        await wait();
       }
 
-      if (stageIdx < stages.length) {
-        const stage = stages[stageIdx];
-        job.currentStage = stage;
+      mark('REPORT', 'running', 'Writing the result hash and audit ledger entry.');
+      const previousHash = this.auditLog.length > 0 ? this.auditLog[0].hashPayload : '0x0000000000000000000000000000000000000000000000000000000000000000';
+      const resultHash = await sha256Hex(JSON.stringify({ jobId: job.id, business: biz.id, results, previousHash }));
+      job.resultHash = resultHash;
+      job.completedAt = new Date().toISOString();
+      job.status = passed ? 'success' : 'failed';
 
-        // Update corresponding closed loop step
-        const step = job.closedLoopSteps?.find((s) => s.stage === stage);
-        if (step) {
-          step.status = 'completed';
-          step.timestamp = new Date().toLocaleTimeString();
-        }
+      this.auditLog.unshift({
+        id: `aud-${(this.auditLog.length + 1).toString().padStart(3, '0')}`,
+        jobId: job.id,
+        agentId: job.agentsUsed[0] || 'core-sec-001',
+        eventTs: job.completedAt,
+        eventType: passed ? 'CLOSED_LOOP_LOCAL_VERIFIED' : 'CLOSED_LOOP_LOCAL_FAILED',
+        hashPayload: resultHash,
+        previousHash,
+        status: 'verified',
+        stageReference: 'REPORT',
+        details: `${passed ? 'Local verification passed' : 'Local verification failed'} for ${biz.name}. ${criticalFindings.length} critical finding(s), ${warningFindings.length} warning(s), ${job.tasksCompleted}/${results.length} task checks passed. External provider actions were not performed.`,
+      });
 
-        // Attach specialized agents
-        if (stage === 'FIND') {
-          const finderCores = this.specialistCores.filter((c) => c.cyberRole === 'finder').slice(0, 5);
-          finderCores.forEach((c) => {
-            if (!job.agentsUsed.includes(c.id)) job.agentsUsed.push(c.id);
-            c.totalJobsProcessed++;
-          });
-          job.logs.push({
-            timestamp: new Date().toLocaleTimeString(),
-            level: 'stage',
-            stage,
-            message: 'Finding Cores (Groups A & B): Located zero critical CVE vulnerabilities.',
-          });
-        } else if (stage === 'EXECUTE') {
-          const bizCores = this.specialistCores.filter((c) => c.type === 'business').slice(0, 10);
-          bizCores.forEach((c) => {
-            if (!job.agentsUsed.includes(c.id)) job.agentsUsed.push(c.id);
-            c.totalJobsProcessed++;
-          });
-          job.tasksCompleted = Math.min(job.totalTasks, job.tasksCompleted + 3);
-          job.logs.push({
-            timestamp: new Date().toLocaleTimeString(),
-            level: 'stage',
-            stage,
-            message: 'EZHKAR Sandbox: Media & Business specialists executed tasks under isolation boundary.',
-          });
-        } else if (stage === 'VERIFY') {
-          job.logs.push({
-            timestamp: new Date().toLocaleTimeString(),
-            level: 'stage',
-            stage,
-            message: 'Consensus Verification: 20 parallel specialist cores casting votes...',
-          });
-        } else if (stage === 'REPORT') {
-          // Generate 20-agent majority vote
-          const passCount = Math.floor(18 + Math.random() * 3);
-          const agentVotes: AgentVoteItem[] = Array.from({ length: 20 }, (_, i) => ({
-            agentId: `core-sec-${(i + 1).toString().padStart(3, '0')}`,
-            agentName: `Sentinel-Alpha ${(i + 1).toString().padStart(3, '0')}`,
-            verdict: i < passCount ? 'PASS' : 'REVIEW',
-            latencyMs: Math.floor(15 + Math.random() * 20),
-            confidence: i < passCount ? 0.98 : 0.88,
-            reason: i < passCount ? 'Assertion satisfied. Code and config verified compliant with zero CVE alerts.' : 'Minor latency telemetry, non-blocking.',
-          }));
-
-          job.votes = {
-            functionName: 'Neural Core Closed-Loop Verification',
-            group: 'A',
-            totalVotes: 20,
-            passedVotes: passCount,
-            majorityThreshold: 11,
-            agreed: passCount >= 11,
-            agentVotes,
-          };
-
-          const prevHash = this.auditLog.length > 0 ? this.auditLog[0].hashPayload : '0x0000000000000000000000000000000000000000000000000000000000000000';
-          const newHash = generateCryptoHash(job.id + Date.now().toString() + prevHash);
-          job.resultHash = newHash;
-          job.completedAt = new Date().toISOString();
-          job.status = 'success';
-          job.tasksCompleted = job.totalTasks;
-
-          job.logs.push({
-            timestamp: new Date().toLocaleTimeString(),
-            level: 'success',
-            stage: 'REPORT',
-            message: `Closed-Loop Execution Passed! Consensus Hash: ${newHash.substring(0, 18)}...`,
-          });
-
-          // Add to Immutable PCA Audit Ledger
-          this.auditLog.unshift({
-            id: `aud-${(this.auditLog.length + 1).toString().padStart(3, '0')}`,
-            jobId: job.id,
-            agentId: job.agentsUsed[0] || 'core-sec-001',
-            eventTs: job.completedAt,
-            eventType: 'CLOSED_LOOP_SWARM_VERIFIED',
-            hashPayload: newHash,
-            previousHash: prevHash,
-            status: 'verified',
-            stageReference: 'REPORT',
-            details: `Neural Core closed-loop run succeeded with ${passCount}/20 quorum. Business: ${biz.name}`,
-          });
-
-          clearInterval(stageInterval);
-        } else {
-          job.logs.push({
-            timestamp: new Date().toLocaleTimeString(),
-            level: 'info',
-            stage,
-            message: `Neural Core: Phase [${stage}] completed successfully.`,
-          });
-        }
-
-        stageIdx++;
-        this.notify();
+      log(passed ? 'success' : 'error', 'REPORT', passed
+        ? `Local closed-loop verification passed. Hash: ${resultHash.slice(0, 18)}... External provider actions were not performed.`
+        : `Local closed-loop verification failed. Hash: ${resultHash.slice(0, 18)}... Review the logged findings before retrying.`);
+      mark('REPORT', passed ? 'completed' : 'failed', `Anchored ${passed ? 'successful' : 'failed'} local verification to the audit ledger.`);
+      this.notify();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown local execution error.';
+      job.status = 'failed';
+      job.completedAt = new Date().toISOString();
+      job.logs.push({ timestamp: new Date().toLocaleTimeString(), level: 'error', stage: job.currentStage, message });
+      const failedStage = job.closedLoopSteps?.find((step) => step.stage === job.currentStage);
+      if (failedStage) {
+        failedStage.status = 'failed';
+        failedStage.details = message;
+        failedStage.timestamp = new Date().toLocaleTimeString();
       }
-    }, 1100);
+      const previousHash = this.auditLog.length > 0 ? this.auditLog[0].hashPayload : '0x0000000000000000000000000000000000000000000000000000000000000000';
+      const failureHash = await sha256Hex(JSON.stringify({ jobId: job.id, business: biz.id, error: message, previousHash }));
+      job.resultHash = failureHash;
+      this.auditLog.unshift({
+        id: `aud-${(this.auditLog.length + 1).toString().padStart(3, '0')}`,
+        jobId: job.id,
+        agentId: job.agentsUsed[0] || 'core-sec-001',
+        eventTs: job.completedAt,
+        eventType: 'CLOSED_LOOP_LOCAL_FAILED',
+        hashPayload: failureHash,
+        previousHash,
+        status: 'verified',
+        stageReference: job.currentStage,
+        details: `Local closed-loop execution failed for ${biz.name}: ${message}`,
+      });
+      this.notify();
+    }
   }
 
+  private scanBlueprint(biz: BusinessProfile, blueprint: Record<string, unknown>) {
+    const findings: Array<{ severity: 'critical' | 'warning'; code: string; detail: string }> = [];
+    const raw = JSON.stringify(blueprint);
+    const secretPattern = /"(api[_-]?key|secret|password|private[_-]?key|access[_-]?token)"\s*:\s*"([^"]{8,})"/gi;
+    let match: RegExpExecArray | null;
+    while ((match = secretPattern.exec(raw)) !== null) {
+      const value = match[2];
+      if (!/^(your|change|replace|example|placeholder|env|todo)/i.test(value)) {
+        findings.push({ severity: 'critical', code: 'HARDCODED_SECRET', detail: `Potential hardcoded ${match[1]} found in the blueprint JSON.` });
+      }
+    }
+    if (/(?<![a-z])http:\/\//i.test(raw)) {
+      findings.push({ severity: 'warning', code: 'INSECURE_URL', detail: 'A non-TLS HTTP URL is present in the blueprint.' });
+    }
+    if (/"Action"\s*:\s*"\*"|"Resource"\s*:\s*"\*"/i.test(raw)) {
+      findings.push({ severity: 'critical', code: 'WILDCARD_PERMISSION', detail: 'Wildcard IAM Action or Resource was found.' });
+    }
+    if (/\beval\s*\(/i.test(raw)) {
+      findings.push({ severity: 'critical', code: 'DYNAMIC_CODE', detail: 'A dynamic eval() expression was found.' });
+    }
+    if (/\b(todo|fixme|changeme)\b/i.test(raw)) {
+      findings.push({ severity: 'warning', code: 'UNRESOLVED_PLACEHOLDER', detail: 'An unresolved TODO/FIXME/CHANGEME marker remains in the blueprint.' });
+    }
+    if (biz.paymentGateway && /stripe|paypal|plaid/i.test(biz.paymentGateway) && !biz.tasks.some((task) => task.function.toLowerCase().includes('billing'))) {
+      findings.push({ severity: 'warning', code: 'PAYMENT_WITHOUT_BILLING_TASK', detail: `Payment gateway "${biz.paymentGateway}" is declared without a billing task.` });
+    }
+    return findings;
+  }
+
+  private async executeLocalTask(
+    task: BlueprintTask,
+    biz: BusinessProfile,
+    blueprint: Record<string, unknown>,
+    findings: Array<{ severity: 'critical' | 'warning'; code: string; detail: string }>,
+  ) {
+    const startedAt = performance.now();
+    const payload = JSON.stringify({
+      taskId: task.id,
+      function: task.function,
+      group: task.group,
+      business: { id: biz.id, name: biz.name, industry: biz.industry, plan: biz.plan },
+      blueprint,
+    });
+    const artifact = await sha256Hex(payload);
+    const taskFindings = findings.filter((finding) => finding.detail.toLowerCase().includes(task.function.toLowerCase()));
+    const ok = Boolean(task.id && task.name && task.function && task.group)
+      && !findings.some((finding) => finding.severity === 'critical' && finding.code === 'WILDCARD_PERMISSION');
+    return {
+      taskId: task.id,
+      name: task.name,
+      ok,
+      artifact,
+      source: payload,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      detail: ok
+        ? `Local dry-run artifact ${artifact.slice(0, 18)}... generated for ${task.function}; no external provider was called.`
+        : `Local check failed for ${task.function}${taskFindings.length ? ` (${taskFindings.map((finding) => finding.code).join(', ')})` : ''}.`,
+    };
+  }
+
+  private async verifyExecutionResults(results: Array<{ taskId: string; name: string; ok: boolean; artifact: string; source: string; latencyMs: number; detail: string }>) {
+    const recomputed = await Promise.all(results.map(async (result) => {
+      const recomputedHash = await sha256Hex(result.source);
+      const valid = Boolean(result.artifact) && recomputedHash === result.artifact;
+      return { result, valid };
+    }));
+    const totalVotes = 20;
+    const agentVotes: AgentVoteItem[] = Array.from({ length: totalVotes }, (_, index) => {
+      const entry = recomputed[index % recomputed.length];
+      const pass = Boolean(entry?.valid && entry.result.ok);
+      return {
+        agentId: `core-sec-${(index + 1).toString().padStart(3, '0')}`,
+        agentName: `Sentinel-Alpha ${(index + 1).toString().padStart(3, '0')}`,
+        verdict: pass ? 'PASS' : 'FAIL',
+        latencyMs: entry?.result.latencyMs ?? 0,
+        confidence: pass ? 1 : 0,
+        reason: pass ? 'Local artifact hash re-computed and task check passed.' : 'Local artifact hash mismatch or task check failed.',
+      };
+    });
+    const passedVotes = agentVotes.filter((vote) => vote.verdict === 'PASS').length;
+    return {
+      allHashesValid: recomputed.every((entry) => entry.valid),
+      votes: {
+        functionName: 'Local closed-loop artifact verification',
+        group: 'A' as AgentGroup,
+        totalVotes,
+        passedVotes,
+        majorityThreshold: 11,
+        agreed: passedVotes >= 11,
+        agentVotes,
+      },
+    };
+  }
   // ==========================================
   // AUDIT LEDGER
   // ==========================================

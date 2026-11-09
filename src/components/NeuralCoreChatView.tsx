@@ -644,7 +644,12 @@ Say **"Take me to investors"**, **"Open bank enclave"**, **"Show 200 cores"**, *
     setIsProcessing(true);
 
     callRealNeuralCore(query).then((realOutput) => {
-      const resp = { text: realOutput || 'Neural Core returned an empty result.' };
+      const localPlan = generateNeuralCoreResponse(query);
+      const resp = {
+        text: realOutput || localPlan.text || 'Neural Core returned an empty result.',
+        actionTag: localPlan.actionTag,
+        autonomousAction: localPlan.autonomousAction,
+      };
       const aiMsg: ChatMessage = {
         id: `ai-${Date.now()}`,
         sender: 'ai',
